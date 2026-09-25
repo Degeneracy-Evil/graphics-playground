@@ -5,13 +5,14 @@ struct VertexOutput {
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
-    var positions = array<vec2<f32>, 3>(
+    // Clip-space positions. No vertex buffer is needed for this first example.
+    let positions = array<vec2<f32>, 3>(
         vec2<f32>( 0.0,  0.6),
         vec2<f32>(-0.6, -0.6),
         vec2<f32>( 0.6, -0.6),
     );
 
-    var colors = array<vec3<f32>, 3>(
+    let colors = array<vec3<f32>, 3>(
         vec3<f32>(1.0, 0.0, 0.0),
         vec3<f32>(0.0, 1.0, 0.0),
         vec3<f32>(0.0, 0.0, 1.0),
@@ -26,5 +27,6 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    // The rasterizer interpolates the three vertex colors across the triangle.
     return vec4<f32>(input.color, 1.0);
 }

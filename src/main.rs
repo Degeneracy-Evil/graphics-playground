@@ -8,14 +8,13 @@ use winit::{
 };
 
 struct GpuState {
-    // Surface 必须和窗口保持绑定。
+    // Keep the window alive for as long as the surface exists.
     _window: Arc<Window>,
 
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    
     render_pipeline: wgpu::RenderPipeline,
 }
 
@@ -23,24 +22,16 @@ impl GpuState {
     async fn new(window: Arc<Window>) -> Self {
         let size = window.inner_size();
 
-        // 1. 创建 wgpu 入口。
-        //let instance = wgpu::Instance::default();
+        // wgpu is the graphics API we write against.
+        // On a normal Linux desktop it will usually select Vulkan underneath.
+        let instance = wgpu::Instance::default();
 
-        let mut instance_desc =
-    wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(
-        window.clone(),
-    ));
-
-instance_desc.backends = wgpu::Backends::GL;
-
-let instance = wgpu::Instance::new(instance_desc);
-
-        // 2. 将 GPU 输出目标绑定到窗口。
+        // A surface connects GPU rendering to a native window.
         let surface = instance
             .create_surface(window.clone())
             .expect("failed to create surface");
 
-        // 3. 选择能够向该窗口绘制的 GPU。
+        // An adapter represents a physical GPU that can render to this surface.
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -48,7 +39,7 @@ let instance = wgpu::Instance::new(instance_desc);
                 ..Default::default()
             })
             .await
-            .expect("failed to find GPU adapter");
+            .expect("failed to find a suitable GPU");
 
         let info = adapter.get_info();
         println!(
@@ -56,13 +47,12 @@ let instance = wgpu::Instance::new(instance_desc);
             info.name, info.backend, info.device_type
         );
 
-        // 4. 从物理 GPU adapter 创建逻辑设备和提交队列。
+        // Device creates GPU resources. Queue submits work to the GPU.
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Main Device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_webgl2_defaults()
-                    .using_resolution(adapter.limits()),
+                required_limits: wgpu::Limits::default(),
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
                 trace: wgpu::Trace::Off,
@@ -70,55 +60,52 @@ let instance = wgpu::Instance::new(instance_desc);
             .await
             .expect("failed to create GPU device");
 
-        // 5. 为窗口选择交换链格式和尺寸。
+        // Configure the images that will be presented to the window.
         let config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
-            .expect("surface is not supported by adapter");
+            .expect("surface is not supported by the selected GPU");
 
         surface.configure(&device, &config);
 
+        // Compile the WGSL shader and describe the fixed-function render pipeline.
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Triangle Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
 
-        let render_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Triangle Pipeline"),
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Triangle Pipeline"),
+            layout: None,
 
-                // 当前 shader 没有外部资源，因此让 wgpu 自动推导布局。
-                layout: None,
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
 
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
+                // The shader generates the three vertices from vertex_index,
+                // so there is no vertex buffer yet.
+                buffers: &[],
+            },
 
-                    // 顶点由 vertex_index 在 shader 中产生。
-                    buffers: &[],
-                },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
 
-                primitive: wgpu::PrimitiveState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
 
-                depth_stencil: None,
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
 
-                multisample: wgpu::MultisampleState::default(),
-
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: config.format,
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-
-                multiview_mask: None,
-                cache: None,
-            });
+            multiview_mask: None,
+            cache: None,
+        });
 
         Self {
             _window: window,
@@ -137,7 +124,7 @@ let instance = wgpu::Instance::new(instance_desc);
     }
 
     fn render(&mut self) {
-        // 取得当前窗口对应的可写纹理。
+        // Get the image that will become the next visible frame.
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
 
@@ -165,7 +152,7 @@ let instance = wgpu::Instance::new(instance_desc);
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        // 创建一份 GPU 命令列表。
+        // Record GPU commands.
         let mut encoder =
             self.device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -173,9 +160,8 @@ let instance = wgpu::Instance::new(instance_desc);
                 });
 
         {
-            // 当前 render pass 不绘制物体，只清屏。
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Clear Pass"),
+                label: Some("Triangle Render Pass"),
 
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
@@ -197,14 +183,15 @@ let instance = wgpu::Instance::new(instance_desc);
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+
             render_pass.set_pipeline(&self.render_pipeline);
+
+            // Run the vertex shader three times and assemble one triangle.
             render_pass.draw(0..3, 0..1);
         }
 
-        // 将命令提交给 GPU。
+        // Submit the recorded commands, then present the finished frame.
         self.queue.submit(Some(encoder.finish()));
-
-        // 将渲染结果显示到窗口。
         self.queue.present(frame);
     }
 }
@@ -222,7 +209,7 @@ impl ApplicationHandler for App {
         }
 
         let attributes = Window::default_attributes()
-            .with_title("WebGPU Playground")
+            .with_title("Graphics Playground")
             .with_inner_size(winit::dpi::LogicalSize::new(800, 600));
 
         let window = Arc::new(
@@ -233,6 +220,7 @@ impl ApplicationHandler for App {
 
         let gpu = pollster::block_on(GpuState::new(window.clone()));
 
+        // The triangle is static, so one initial redraw is enough.
         window.request_redraw();
 
         self.window = Some(window);
@@ -252,7 +240,7 @@ impl ApplicationHandler for App {
                 if let Some(gpu) = &mut self.gpu {
                     gpu.resize(size.width, size.height);
                 }
-                
+
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -267,7 +255,6 @@ impl ApplicationHandler for App {
             _ => {}
         }
     }
-
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
